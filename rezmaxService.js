@@ -42,19 +42,19 @@ const sendToRezMax = async (xmlString) => {
     const response = await axios.post(CONFIG.URL, params, {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
     });
-    // Log doar primele 200 caractere pentru debug
-    if(response.data) console.log("[RezMax Response Head]:", response.data.substring(0, 200));
+    // Logheaza un pic din raspuns ca sa stim ca serverul traieste
+    if(response.data) console.log("[RezMax Net Response]:", response.data.substring(0, 100) + "...");
     return parser.parse(response.data);
 };
 
 module.exports = {
+    // --- 1. ORASE (Merge deja) ---
     getDepartureCities: async () => {
         const xml = buildBaseXML('REZMax_getDepartureCitiesRQ').end({ prettyPrint: false });
         try {
             const data = await sendToRezMax(xml);
             const root = data.REZMax_getDepartureCitiesRS;
 
-            // FIX: Verificam daca proprietatea EXISTA, nu daca are valoare (pt ca <Success/> e gol)
             if (!root || root.Success === undefined) {
                 console.error("API Error Dump:", JSON.stringify(root));
                 throw new Error("API Error or No Success Tag");
@@ -77,7 +77,10 @@ module.exports = {
         }
     },
 
+    // --- 2. CAUTARE CURSE---
     searchBuses: async (depId, destId, date, seats = 1) => {
+        console.log(`[SERVICE] START Cautare: ${depId} -> ${destId} pe data ${date}`);
+        
         const doc = buildBaseXML('REZMax_getBusAvailRQ');
         doc.root().ele('OriginDestinationInformation', { ShowAll: 'true', Seats: seats })
             .ele('DepartureDateTime').txt(date).up()
@@ -86,46 +89,54 @@ module.exports = {
         .up();
 
         const xml = doc.end({ prettyPrint: false });
-        const data = await sendToRezMax(xml);
-        const root = data.REZMax_getBusAvailRS;
+        
+        try {
+            const data = await sendToRezMax(xml);
+            const root = data.REZMax_getBusAvailRS;
 
-        // FIX: Aceeasi corectie pentru Success
-        if (!root || root.Success === undefined) {
-            // Daca nu e succes, verificam daca e eroare reala sau doar lipsa curse
-            let err = "Unknown Error";
-            if (root?.Warnings?.Warning) {
-                const w = root.Warnings.Warning;
-                err = w.ShortText || JSON.stringify(w);
+            // --- MESAJUL REAL DE LA REZMAX ---
+            console.log("🔍 [REZMAX RAW RASPUNS]:", JSON.stringify(root));
+
+            if (!root) {
+                return { success: false, count: 0, error: "Raspuns gol de la server" };
             }
-            // RezMax poate da eroare daca nu sunt curse, tratam ca lista goala
-            if (err.includes("Nu exista curse") || err.includes("No routes")) {
-                return { success: true, buses: [] };
+
+            // Verificam daca exista erori explicite
+            if (root.Errors || (root.Warnings && root.Success === undefined)) {
+                 const errObj = root.Errors || root.Warnings;
+                 console.log("⚠️ [REZMAX REFUZ]:", JSON.stringify(errObj));
             }
-            // Altfel e eroare tehnica
-            console.error("Search Error Dump:", JSON.stringify(root));
-            return { success: true, buses: [] }; // Returnam gol safe
+
+            // Extragem optiunile de calatorie
+            let options = root.OriginDestinationInformation?.OriginDestinationOptions?.OriginDestinationOption || [];
+            if (!Array.isArray(options)) options = [options];
+
+            const buses = options.map(opt => {
+                let segment = opt.Segment;
+                if (Array.isArray(segment)) segment = segment[0];
+                
+                if (!segment) return null;
+
+                let tickets = segment.TicketAvail || [];
+                if (!Array.isArray(tickets)) tickets = [tickets];
+                const standardTicket = tickets.find(t => t.PassengerType === '*') || tickets[0];
+
+                return {
+                    optionId: opt.OptionId,
+                    departureTime: segment.DepartureDateTime?.split('T')[1]?.substring(0, 5),
+                    arrivalTime: segment.ArrivalDateTime?.split('T')[1]?.substring(0, 5),
+                    company: segment.MarketingBusline?.CompanyName || "Partener JetCab",
+                    price: standardTicket ? standardTicket.Price : "N/A",
+                    currency: standardTicket ? standardTicket.Currency : "RON"
+                };
+            }).filter(b => b !== null); // Scoatem elementele null
+
+            return { success: true, count: buses.length, buses: buses };
+
+        } catch (e) {
+            console.error("[SERVICE ERROR] Search failed:", e.message);
+            // Returnam 0 curse safe, dar cu mesaj de eroare in consola
+            return { success: false, error: e.message, count: 0, buses: [] };
         }
-
-        let options = root.OriginDestinationInformation?.OriginDestinationOptions?.OriginDestinationOption || [];
-        if (!Array.isArray(options)) options = [options];
-
-        const buses = options.map(opt => {
-            let segment = opt.Segment;
-            if (Array.isArray(segment)) segment = segment[0];
-            let tickets = segment.TicketAvail || [];
-            if (!Array.isArray(tickets)) tickets = [tickets];
-            const standardTicket = tickets.find(t => t.PassengerType === '*') || tickets[0];
-
-            return {
-                optionId: opt.OptionId,
-                departureTime: segment.DepartureDateTime?.split('T')[1]?.substring(0, 5),
-                arrivalTime: segment.ArrivalDateTime?.split('T')[1]?.substring(0, 5),
-                company: segment.MarketingBusline?.CompanyName || "JetCab",
-                price: standardTicket ? standardTicket.Price : "N/A",
-                currency: standardTicket ? standardTicket.Currency : "RON"
-            };
-        });
-
-        return { success: true, count: buses.length, buses: buses };
     }
 };
