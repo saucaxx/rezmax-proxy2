@@ -1,56 +1,117 @@
-const express = require('express');
-const cors = require('cors');
-const rezmaxService = require('./rezmaxService');
-require('dotenv').config();
+const axios = require('axios');
+const { create } = require('xmlbuilder2');
+const { XMLParser } = require('fast-xml-parser');
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+// Configurare Credentiale
+const CONFIG = {
+    URL: process.env.REZMAX_URL || 'https://rezmax.ro/Services/Ticketing.aspx',
+    AGENT: process.env.REZMAX_AGENT || 'JetCab',
+    ID: process.env.REZMAX_ID,
+    PASS: process.env.REZMAX_PASS
+};
 
-// Middleware
-app.use(cors());
-app.use(express.json());
-
-// --- RUTE ---
-
-// 1. Test Server
-app.get('/', (req, res) => {
-    res.send('JetCab RezMax Proxy is running! 🚀');
+// Configurare Parser
+const parser = new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: ""
 });
 
-// 2. Get Departure Cities (Orase de plecare)
-app.get('/api/cities', async (req, res) => {
-    try {
-        console.log("[Proxy] Fetching departure cities...");
-        const result = await rezmaxService.getDepartureCities();
-        res.json(result);
-    } catch (error) {
-        console.error("[Proxy Error] /api/cities:", error.message);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
+// Helper: XML de baza
+const buildBaseXML = (rootTagName) => {
+    const root = create({ version: '1.0', encoding: 'utf-8' })
+        .ele(rootTagName)
+        .ele('POS')
+        .ele('Source', { 
+            AgentSine: CONFIG.AGENT, 
+            City: 'Brasov', 
+            ISOCountry: 'RO', 
+            ISOCurrency: 'RON', 
+            Language: 'RO' 
+        })
+        .ele('RequestorID', { 
+            ID: CONFIG.ID, 
+            PASS: CONFIG.PASS 
+        })
+        .up().up().up();
+    return root;
+};
 
-// 3. Search Buses (Cautare Curse)
-app.post('/api/search', async (req, res) => {
-    try {
-        const { departureCityId, destinationCityId, date, passengers } = req.body;
-        
-        console.log(`[Proxy] Searching: ${departureCityId} -> ${destinationCityId} on ${date}`);
-        
-        // Validare simpla
-        if (!departureCityId || !destinationCityId || !date) {
-            return res.status(400).json({ success: false, error: "Missing required fields" });
+// Helper: Trimite request
+const sendToRezMax = async (xmlString) => {
+    const params = new URLSearchParams();
+    params.append('rq', xmlString);
+
+    const response = await axios.post(CONFIG.URL, params, {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    });
+    // Log pentru debugging
+    if(response.data) console.log("[RezMax Raw Snippet]:", response.data.substring(0, 100));
+    return parser.parse(response.data);
+};
+
+// EXPORTAM DOAR FUNCTIILE
+module.exports = {
+    getDepartureCities: async () => {
+        const xml = buildBaseXML('REZMax_getDepartureCitiesRQ').end({ prettyPrint: false });
+        try {
+            const data = await sendToRezMax(xml);
+            const root = data.REZMax_getDepartureCitiesRS;
+
+            if (!root || !root.Success) throw new Error("API Error or No Success Tag");
+
+            let cityList = root.CityList?.City || [];
+            if (!Array.isArray(cityList)) cityList = [cityList];
+
+            return {
+                success: true,
+                cities: cityList.map(c => ({
+                    id: c.Id,
+                    name: c.Name,
+                    region: c.RegionName
+                }))
+            };
+        } catch (e) {
+            console.error("Error getDepartureCities:", e.message);
+            throw e;
+        }
+    },
+
+    searchBuses: async (depId, destId, date, seats = 1) => {
+        const doc = buildBaseXML('REZMax_getBusAvailRQ');
+        doc.root().ele('OriginDestinationInformation', { ShowAll: 'true', Seats: seats })
+            .ele('DepartureDateTime').txt(date).up()
+            .ele('OriginLocation', { LocationCode: depId }).up()
+            .ele('DestinationLocation', { LocationCode: destId }).up()
+        .up();
+
+        const xml = doc.end({ prettyPrint: false });
+        const data = await sendToRezMax(xml);
+        const root = data.REZMax_getBusAvailRS;
+
+        if (!root || !root.Success) {
+            return { success: true, buses: [] }; // Tratam eroarea ca lipsa curse
         }
 
-        const result = await rezmaxService.searchBuses(departureCityId, destinationCityId, date, passengers || 1);
-        res.json(result);
+        let options = root.OriginDestinationInformation?.OriginDestinationOptions?.OriginDestinationOption || [];
+        if (!Array.isArray(options)) options = [options];
 
-    } catch (error) {
-        console.error("[Proxy Error] /api/search:", error.message);
-        res.status(500).json({ success: false, error: error.message });
+        const buses = options.map(opt => {
+            let segment = opt.Segment;
+            if (Array.isArray(segment)) segment = segment[0];
+            let tickets = segment.TicketAvail || [];
+            if (!Array.isArray(tickets)) tickets = [tickets];
+            const standardTicket = tickets.find(t => t.PassengerType === '*') || tickets[0];
+
+            return {
+                optionId: opt.OptionId,
+                departureTime: segment.DepartureDateTime?.split('T')[1]?.substring(0, 5),
+                arrivalTime: segment.ArrivalDateTime?.split('T')[1]?.substring(0, 5),
+                company: segment.MarketingBusline?.CompanyName || "JetCab",
+                price: standardTicket ? standardTicket.Price : "N/A",
+                currency: standardTicket ? standardTicket.Currency : "RON"
+            };
+        });
+
+        return { success: true, count: buses.length, buses: buses };
     }
-});
-
-// Pornire Server
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
+};
