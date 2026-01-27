@@ -10,13 +10,12 @@ const CONFIG = {
     PASS: process.env.REZMAX_PASS
 };
 
-// Configurare Parser
+// Configurare Parser XML
 const parser = new XMLParser({
     ignoreAttributes: false,
     attributeNamePrefix: ""
 });
 
-// Helper: XML de baza
 const buildBaseXML = (rootTagName) => {
     const root = create({ version: '1.0', encoding: 'utf-8' })
         .ele(rootTagName)
@@ -36,7 +35,6 @@ const buildBaseXML = (rootTagName) => {
     return root;
 };
 
-// Helper: Trimite request
 const sendToRezMax = async (xmlString) => {
     const params = new URLSearchParams();
     params.append('rq', xmlString);
@@ -44,12 +42,11 @@ const sendToRezMax = async (xmlString) => {
     const response = await axios.post(CONFIG.URL, params, {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
     });
-    // Log pentru debugging
-    if(response.data) console.log("[RezMax Raw Snippet]:", response.data.substring(0, 100));
+    // Log doar primele 200 caractere pentru debug
+    if(response.data) console.log("[RezMax Response Head]:", response.data.substring(0, 200));
     return parser.parse(response.data);
 };
 
-// EXPORTAM DOAR FUNCTIILE
 module.exports = {
     getDepartureCities: async () => {
         const xml = buildBaseXML('REZMax_getDepartureCitiesRQ').end({ prettyPrint: false });
@@ -57,7 +54,11 @@ module.exports = {
             const data = await sendToRezMax(xml);
             const root = data.REZMax_getDepartureCitiesRS;
 
-            if (!root || !root.Success) throw new Error("API Error or No Success Tag");
+            // FIX: Verificam daca proprietatea EXISTA, nu daca are valoare (pt ca <Success/> e gol)
+            if (!root || root.Success === undefined) {
+                console.error("API Error Dump:", JSON.stringify(root));
+                throw new Error("API Error or No Success Tag");
+            }
 
             let cityList = root.CityList?.City || [];
             if (!Array.isArray(cityList)) cityList = [cityList];
@@ -88,8 +89,21 @@ module.exports = {
         const data = await sendToRezMax(xml);
         const root = data.REZMax_getBusAvailRS;
 
-        if (!root || !root.Success) {
-            return { success: true, buses: [] }; // Tratam eroarea ca lipsa curse
+        // FIX: Aceeasi corectie pentru Success
+        if (!root || root.Success === undefined) {
+            // Daca nu e succes, verificam daca e eroare reala sau doar lipsa curse
+            let err = "Unknown Error";
+            if (root?.Warnings?.Warning) {
+                const w = root.Warnings.Warning;
+                err = w.ShortText || JSON.stringify(w);
+            }
+            // RezMax poate da eroare daca nu sunt curse, tratam ca lista goala
+            if (err.includes("Nu exista curse") || err.includes("No routes")) {
+                return { success: true, buses: [] };
+            }
+            // Altfel e eroare tehnica
+            console.error("Search Error Dump:", JSON.stringify(root));
+            return { success: true, buses: [] }; // Returnam gol safe
         }
 
         let options = root.OriginDestinationInformation?.OriginDestinationOptions?.OriginDestinationOption || [];
