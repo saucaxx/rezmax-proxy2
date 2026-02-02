@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const rezmaxService = require('./rezmaxService'); // Aici importa fisierul de mai sus
+const rezmaxService = require('./rezmaxService'); 
 require('dotenv').config();
 
 const app = express();
@@ -37,8 +37,7 @@ app.post('/api/seats', async (req, res) => {
         
         console.log(`[API] Cerere locuri pentru OptionID: ${optionId}`);
 
-        // Pasul A: Obtinem LinkId-ul real (Trip Details)
-        // RezMax cere LinkId pentru seats, nu OptionId-ul de la Search
+        // Pasul A: Obtinem LinkId si verificam DACA se pot alege locuri
         const details = await rezmaxService.getTripDetails(optionId, date);
         
         if (!details.success) {
@@ -46,15 +45,26 @@ app.post('/api/seats', async (req, res) => {
         }
 
         const realLinkId = details.linkId;
-        console.log(`[API] LinkId real identificat: ${realLinkId}`);
+        console.log(`[API] LinkId: ${realLinkId} | Se pot alege locuri? ${details.seatSelect}`);
 
-        // Pasul B: Obtinem locurile folosind LinkId
+        // LOGICA NOUA: Daca RezMax zice SeatSelect="0", ne oprim aici.
+        if (!details.seatSelect) {
+            return res.json({
+                success: true,
+                linkId: realLinkId,
+                autoAllocation: true, // Flag special pentru Botpress
+                availableSeats: [],
+                message: "Locurile se aloca automat la imbarcare."
+            });
+        }
+
+        // Pasul B: Daca SeatSelect="1", abia atunci cerem harta
         const seatsResult = await rezmaxService.getBusSeats(realLinkId, date);
         
-        // Trimitem totul inapoi la Botpress
         res.json({
             success: true,
-            linkId: realLinkId, // Il trimitem ca sa il salvam in Botpress pentru Rezervare
+            linkId: realLinkId,
+            autoAllocation: false,
             ...seatsResult
         });
 
@@ -63,8 +73,6 @@ app.post('/api/seats', async (req, res) => {
     }
 });
 
-// ACEASTA ESTE SINGURA LINIE CARE PORNESTE SERVERUL
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
-
