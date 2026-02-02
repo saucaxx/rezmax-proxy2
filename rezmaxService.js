@@ -158,7 +158,6 @@ module.exports = {
         }
     },
 
-    // 4. HARTA LOCURILOR
     // 4. HARTA LOCURILOR (Versiune cu DEBUG)
     getBusSeats: async (linkId, date) => {
         console.log(`[SERVICE DEBUG] Cerere locuri -> LinkId: ${linkId}, Data: ${date}`);
@@ -168,22 +167,38 @@ module.exports = {
         const xmlRequest = doc.end({ prettyPrint: false });
 
         try {
+            // 1. Trimitem cererea
             const data = await sendToRezMax(xmlRequest);
-            const root = data.REZMax_GetBusSeatsRS;
 
-            // DEBUG: Vedem ce a raspuns RezMax in consola serverului
-            console.log(`[SERVICE DEBUG] Raspuns RezMax:`, JSON.stringify(root));
+            // 2. DEBUG CRITIC: Vedem TOATE cheile primite, nu doar ce cautam noi
+            console.log("------------------------------------------------");
+            console.log("[CRITIC] Raspuns RAW parsat:", JSON.stringify(data));
+            console.log("------------------------------------------------");
 
-            // Verificare erori specifice RezMax
+            // 3. Incercam sa gasim root-ul, indiferent de litere mari/mici
+            // Uneori RezMax trimite 'REZMax_getBusSeatsRS' (g mic) alteori 'REZMax_GetBusSeatsRS' (G mare)
+            const root = data.REZMax_GetBusSeatsRS || data.REZMax_getBusSeatsRS;
+
+            if (!root) {
+                // Daca tot nu il gasim, returnam eroare dar NU CRAPAM serverul
+                console.error("[SERVICE ERROR] Nu gasesc tag-ul de raspuns (GetBusSeatsRS).");
+                return { 
+                    success: false, 
+                    error: "Format raspuns necunoscut de la RezMax.",
+                    debugData: data // Trimitem tot ce am primit ca sa vezi in Botpress
+                };
+            }
+
+            // 4. Verificare erori interne RezMax
             if (root.Warnings && root.Warnings.Warning) {
                 console.error("[REZMAX WARNING]", JSON.stringify(root.Warnings.Warning));
             }
 
-            if (!root || !root.Bus || !root.Bus.Seats) {
+            if (!root.Bus || !root.Bus.Seats) {
                 return { 
                     success: false, 
-                    error: "Nu exista harta locurilor (Verifica Logs pe Render).",
-                    rawResponse: root // Trimitem inapoi si raspunsul brut pt debugging
+                    error: "Nu exista harta locurilor (root gasit, dar fara Seats).",
+                    rawResponse: root 
                 };
             }
 
@@ -215,9 +230,10 @@ module.exports = {
             };
 
         } catch (e) {
-            console.error("[SERVICE ERROR] getBusSeats:", e.message);
-            return { success: false, error: e.message };
+            console.error("[SERVICE ERROR] getBusSeats Exception:", e.message);
+            return { success: false, error: "Eroare server: " + e.message };
         }
     }
 };
+
 
