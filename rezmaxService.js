@@ -39,33 +39,24 @@ const sendToRezMax = async (xmlString) => {
     const params = new URLSearchParams();
     params.append('rq', xmlString);
 
-    console.log("------------------------------------------------");
-    console.log("[DEBUG REQUEST] XML Trimis:", xmlString); // Vedem exact ce cerem
-    console.log("------------------------------------------------");
+    console.log("[DEBUG REQUEST] XML Trimis:", xmlString);
 
     try {
         const response = await axios.post(CONFIG.URL, params, {
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
         });
 
-        // --- AICI ESTE CHEIA: Vedem ce raspunde serverul inainte sa parsam ---
         const rawData = response.data;
-        console.log("------------------------------------------------");
-        console.log("[DEBUG RESPONSE RAW]:", typeof rawData, rawData);
-        console.log("------------------------------------------------");
-
-        // Daca raspunsul e gol sau nu e string, parserul returneaza {}
-        if (!rawData) {
-            console.error("[CRITIC] RezMax a raspuns cu un body gol!");
-            return {};
+        
+        // Verificare raspuns gol sau eroare textuala
+        if (!rawData || typeof rawData !== 'string' || rawData.includes("Comanda necunoscuta")) {
+            console.error("[CRITIC] Raspuns invalid de la RezMax:", rawData);
+            return { invalidResponse: true, raw: rawData };
         }
 
         return parser.parse(rawData);
     } catch (error) {
-        console.error("[AXIOS ERROR] Conexiunea a esuat:", error.message);
-        if (error.response) {
-             console.error("[AXIOS DATA]:", error.response.data);
-        }
+        console.error("[AXIOS ERROR]", error.message);
         throw error;
     }
 };
@@ -114,15 +105,13 @@ module.exports = {
             const data = await sendToRezMax(xml);
             const root = data.REZMax_getBusAvailRS;
 
-            if (!root) return { success: false, count: 0, error: "Raspuns gol" };
+            if (!root || !root.OriginDestinationInformation) return { success: false, count: 0, error: "Raspuns gol" };
 
             const info = root.OriginDestinationInformation;
-            
             let options = info?.Options?.Option;
-            if (!options) {
-                options = info?.OriginDestinationOptions?.OriginDestinationOption;
-            }
-
+            
+            // Fallback structures
+            if (!options) options = info?.OriginDestinationOptions?.OriginDestinationOption;
             if (!options) options = [];
             if (!Array.isArray(options)) options = [options];
 
@@ -147,16 +136,14 @@ module.exports = {
                 };
             }).filter(b => b !== null);
 
-            // CORECTIE: Returnam lista de autobuze, nu un linkId
             return { success: true, count: buses.length, buses: buses };
 
         } catch (e) {
-            console.error("[SERVICE ERROR] searchBuses:", e.message);
             return { success: false, error: e.message, count: 0, buses: [] };
         }
     },
 
-    // 3. DETALII CURSA (NOU - Adaugat corect)
+    // 3. DETALII CURSA (UPDATE: Extragem SeatSelect)
     getTripDetails: async (optionId, date) => {
         const doc = buildBaseXML('REZMax_getTripDetailsRQ');
         doc.root().ele('Trip', { OptionId: optionId, DepartureDateTime: date }).up();
@@ -170,11 +157,15 @@ module.exports = {
             let segment = root.Segments.Segment;
             if (Array.isArray(segment)) segment = segment[0]; 
 
+            // LOGIC CHECK: SeatSelect="1" inseamna ca putem alege locul
+            const canSelect = segment.SeatSelect === "1";
+            console.log(`[DETAILS] LinkId: ${segment.LinkId}, SeatSelect: ${segment.SeatSelect} (CanSelect: ${canSelect})`);
+
             return {
                 success: true,
                 linkId: segment.LinkId,
                 departureDate: segment.DepartureDate || date,
-                busType: segment.Equipment?.BusType || "Bus"
+                seatSelect: canSelect // Trimitem asta mai departe
             };
 
         } catch (e) {
@@ -183,48 +174,26 @@ module.exports = {
         }
     },
 
-    // 4. HARTA LOCURILOR (Versiune cu DEBUG)
+    // 4. HARTA LOCURILOR (UPDATE: Corectat Tag XML)
     getBusSeats: async (linkId, date) => {
-        console.log(`[SERVICE DEBUG] Cerere locuri -> LinkId: ${linkId}, Data: ${date}`);
+        console.log(`[SERVICE] GetBusSeats pt ${linkId}`);
         
-        const doc = buildBaseXML('REZMax_getBusSeatsRQ');
+        // CORECTIE MAJORA: G mare la GetBusSeats
+        const doc = buildBaseXML('REZMax_GetBusSeatsRQ');
         doc.root().ele('Segment', { OptionId: linkId, Date: date }).up();
-        const xmlRequest = doc.end({ prettyPrint: false });
 
         try {
-            // 1. Trimitem cererea
-            const data = await sendToRezMax(xmlRequest);
+            const data = await sendToRezMax(doc.end({ prettyPrint: false }));
+            
+            if (data.invalidResponse) {
+                return { success: false, error: "Eroare comanda RezMax: " + data.raw };
+            }
 
-            // 2. DEBUG CRITIC: Vedem TOATE cheile primite, nu doar ce cautam noi
-            console.log("------------------------------------------------");
-            console.log("[CRITIC] Raspuns RAW parsat:", JSON.stringify(data));
-            console.log("------------------------------------------------");
-
-            // 3. Incercam sa gasim root-ul, indiferent de litere mari/mici
-            // Uneori RezMax trimite 'REZMax_getBusSeatsRS' (g mic) alteori 'REZMax_GetBusSeatsRS' (G mare)
+            // Cautam raspunsul cu G mare sau g mic
             const root = data.REZMax_GetBusSeatsRS || data.REZMax_getBusSeatsRS;
 
-            if (!root) {
-                // Daca tot nu il gasim, returnam eroare dar NU CRAPAM serverul
-                console.error("[SERVICE ERROR] Nu gasesc tag-ul de raspuns (GetBusSeatsRS).");
-                return { 
-                    success: false, 
-                    error: "Format raspuns necunoscut de la RezMax.",
-                    debugData: data // Trimitem tot ce am primit ca sa vezi in Botpress
-                };
-            }
-
-            // 4. Verificare erori interne RezMax
-            if (root.Warnings && root.Warnings.Warning) {
-                console.error("[REZMAX WARNING]", JSON.stringify(root.Warnings.Warning));
-            }
-
-            if (!root.Bus || !root.Bus.Seats) {
-                return { 
-                    success: false, 
-                    error: "Nu exista harta locurilor (root gasit, dar fara Seats).",
-                    rawResponse: root 
-                };
+            if (!root || !root.Bus || !root.Bus.Seats) {
+                return { success: false, error: "Harta locurilor nu este disponibila." };
             }
 
             const rows = root.Bus.Seats.Row;
@@ -255,11 +224,8 @@ module.exports = {
             };
 
         } catch (e) {
-            console.error("[SERVICE ERROR] getBusSeats Exception:", e.message);
-            return { success: false, error: "Eroare server: " + e.message };
+            console.error("[SERVICE ERROR] getBusSeats:", e.message);
+            return { success: false, error: e.message };
         }
     }
 };
-
-
-
