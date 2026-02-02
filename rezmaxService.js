@@ -159,21 +159,36 @@ module.exports = {
     },
 
     // 4. HARTA LOCURILOR
+    // 4. HARTA LOCURILOR (Versiune cu DEBUG)
     getBusSeats: async (linkId, date) => {
+        console.log(`[SERVICE DEBUG] Cerere locuri -> LinkId: ${linkId}, Data: ${date}`);
+        
         const doc = buildBaseXML('REZMax_getBusSeatsRQ');
         doc.root().ele('Segment', { OptionId: linkId, Date: date }).up();
+        const xmlRequest = doc.end({ prettyPrint: false });
 
         try {
-            const data = await sendToRezMax(doc.end({ prettyPrint: false }));
+            const data = await sendToRezMax(xmlRequest);
             const root = data.REZMax_GetBusSeatsRS;
 
+            // DEBUG: Vedem ce a raspuns RezMax in consola serverului
+            console.log(`[SERVICE DEBUG] Raspuns RezMax:`, JSON.stringify(root));
+
+            // Verificare erori specifice RezMax
+            if (root.Warnings && root.Warnings.Warning) {
+                console.error("[REZMAX WARNING]", JSON.stringify(root.Warnings.Warning));
+            }
+
             if (!root || !root.Bus || !root.Bus.Seats) {
-                return { success: false, error: "Nu exista harta locurilor." };
+                return { 
+                    success: false, 
+                    error: "Nu exista harta locurilor (Verifica Logs pe Render).",
+                    rawResponse: root // Trimitem inapoi si raspunsul brut pt debugging
+                };
             }
 
             const rows = root.Bus.Seats.Row;
             const seatsMap = [];
-            
             const rowsArray = Array.isArray(rows) ? rows : [rows];
             
             rowsArray.forEach((row, rowIndex) => {
@@ -205,3 +220,4 @@ module.exports = {
         }
     }
 };
+
