@@ -31,7 +31,40 @@ app.post('/api/search', async (req, res) => {
     }
 });
 
+app.post('/api/seats', async (req, res) => {
+    try {
+        const { optionId, date } = req.body;
+        
+        console.log(`[API] Cerere locuri pentru OptionID: ${optionId}`);
+
+        // Pasul A: Obtinem LinkId-ul real (Trip Details)
+        // RezMax cere LinkId pentru seats, nu OptionId-ul de la Search
+        const details = await rezmaxService.getTripDetails(optionId, date);
+        
+        if (!details.success) {
+            return res.json({ success: false, error: "Eroare la obtinerea detaliilor cursei." });
+        }
+
+        const realLinkId = details.linkId;
+        console.log(`[API] LinkId real identificat: ${realLinkId}`);
+
+        // Pasul B: Obtinem locurile folosind LinkId
+        const seatsResult = await rezmaxService.getBusSeats(realLinkId, date);
+        
+        // Trimitem totul inapoi la Botpress
+        res.json({
+            success: true,
+            linkId: realLinkId, // Il trimitem ca sa il salvam in Botpress pentru Rezervare
+            ...seatsResult
+        });
+
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 // ACEASTA ESTE SINGURA LINIE CARE PORNESTE SERVERUL
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
+
