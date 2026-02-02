@@ -72,7 +72,7 @@ module.exports = {
         }
     },
 
-    // 2. CAUTARE CURSE (AICI AM FACUT CORECTIA DE STRUCTURA)
+    // 2. CAUTARE CURSE
     searchBuses: async (depId, destId, date, seats = 1) => {
         console.log(`[SERVICE] Cautare: ${depId} -> ${destId} pe ${date}`);
         
@@ -91,18 +91,13 @@ module.exports = {
 
             if (!root) return { success: false, count: 0, error: "Raspuns gol" };
 
-            // --- FIX-UL MAJOR: Citim calea corecta din Log-ul tau ---
             const info = root.OriginDestinationInformation;
             
-            // Varianta 1: Calea vazuta in loguri (Options -> Option)
             let options = info?.Options?.Option;
-
-            // Varianta 2: Fallback (in caz ca se razgandesc)
             if (!options) {
                 options = info?.OriginDestinationOptions?.OriginDestinationOption;
             }
 
-            // Daca nici acum nu e array, il facem array sau gol
             if (!options) options = [];
             if (!Array.isArray(options)) options = [options];
 
@@ -127,11 +122,86 @@ module.exports = {
                 };
             }).filter(b => b !== null);
 
+            // CORECTIE: Returnam lista de autobuze, nu un linkId
             return { success: true, count: buses.length, buses: buses };
 
         } catch (e) {
-            console.error("[SERVICE ERROR]", e.message);
+            console.error("[SERVICE ERROR] searchBuses:", e.message);
             return { success: false, error: e.message, count: 0, buses: [] };
+        }
+    },
+
+    // 3. DETALII CURSA (NOU - Adaugat corect)
+    getTripDetails: async (optionId, date) => {
+        const doc = buildBaseXML('REZMax_getTripDetailsRQ');
+        doc.root().ele('Trip', { OptionId: optionId, DepartureDateTime: date }).up();
+        
+        try {
+            const data = await sendToRezMax(doc.end({ prettyPrint: false }));
+            const root = data.REZMax_getTripDetailsRS;
+            
+            if (!root || !root.Segments) throw new Error("Nu am putut obtine detaliile cursei.");
+
+            let segment = root.Segments.Segment;
+            if (Array.isArray(segment)) segment = segment[0]; 
+
+            return {
+                success: true,
+                linkId: segment.LinkId,
+                departureDate: segment.DepartureDate || date,
+                busType: segment.Equipment?.BusType || "Bus"
+            };
+
+        } catch (e) {
+            console.error("[SERVICE ERROR] getTripDetails:", e.message);
+            return { success: false, error: e.message };
+        }
+    },
+
+    // 4. HARTA LOCURILOR
+    getBusSeats: async (linkId, date) => {
+        const doc = buildBaseXML('REZMax_getBusSeatsRQ');
+        doc.root().ele('Segment', { OptionId: linkId, Date: date }).up();
+
+        try {
+            const data = await sendToRezMax(doc.end({ prettyPrint: false }));
+            const root = data.REZMax_GetBusSeatsRS;
+
+            if (!root || !root.Bus || !root.Bus.Seats) {
+                return { success: false, error: "Nu exista harta locurilor." };
+            }
+
+            const rows = root.Bus.Seats.Row;
+            const seatsMap = [];
+            
+            const rowsArray = Array.isArray(rows) ? rows : [rows];
+            
+            rowsArray.forEach((row, rowIndex) => {
+                let seats = row.Seat;
+                if (!seats) return;
+                if (!Array.isArray(seats)) seats = [seats];
+
+                seats.forEach(seat => {
+                    if (seat.N) {
+                        seatsMap.push({
+                            number: seat.N,
+                            isOccupied: seat.O === "1",
+                            row: rowIndex + 1
+                        });
+                    }
+                });
+            });
+
+            return {
+                success: true,
+                totalSeats: seatsMap.length,
+                availableSeats: seatsMap.filter(s => !s.isOccupied).map(s => s.number),
+                fullMap: seatsMap
+            };
+
+        } catch (e) {
+            console.error("[SERVICE ERROR] getBusSeats:", e.message);
+            return { success: false, error: e.message };
         }
     }
 };
