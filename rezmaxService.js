@@ -39,10 +39,35 @@ const sendToRezMax = async (xmlString) => {
     const params = new URLSearchParams();
     params.append('rq', xmlString);
 
-    const response = await axios.post(CONFIG.URL, params, {
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-    });
-    return parser.parse(response.data);
+    console.log("------------------------------------------------");
+    console.log("[DEBUG REQUEST] XML Trimis:", xmlString); // Vedem exact ce cerem
+    console.log("------------------------------------------------");
+
+    try {
+        const response = await axios.post(CONFIG.URL, params, {
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+        });
+
+        // --- AICI ESTE CHEIA: Vedem ce raspunde serverul inainte sa parsam ---
+        const rawData = response.data;
+        console.log("------------------------------------------------");
+        console.log("[DEBUG RESPONSE RAW]:", typeof rawData, rawData);
+        console.log("------------------------------------------------");
+
+        // Daca raspunsul e gol sau nu e string, parserul returneaza {}
+        if (!rawData) {
+            console.error("[CRITIC] RezMax a raspuns cu un body gol!");
+            return {};
+        }
+
+        return parser.parse(rawData);
+    } catch (error) {
+        console.error("[AXIOS ERROR] Conexiunea a esuat:", error.message);
+        if (error.response) {
+             console.error("[AXIOS DATA]:", error.response.data);
+        }
+        throw error;
+    }
 };
 
 module.exports = {
@@ -235,5 +260,6 @@ module.exports = {
         }
     }
 };
+
 
 
